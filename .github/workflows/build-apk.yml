@@ -11,8 +11,12 @@ permissions:
 
 jobs:
   build:
-    name: Build Android PDF Reader
+    name: Build Android APK
     runs-on: ubuntu-latest
+
+    env:
+      ANDROID_HOME: /usr/local/lib/android/sdk
+      ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
 
     steps:
       - name: جلب الكود
@@ -24,44 +28,32 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: إعداد Android SDK
+      - name: تجهيز Android SDK
         uses: android-actions/setup-android@v3
-        continue-on-error: true
 
-      - name: إصلاح وتجهيز Android SDK
+      - name: تثبيت مكونات Android SDK
         shell: bash
         run: |
           set -e
 
-          SDK="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
-          echo "ANDROID_HOME=$SDK" >> "$GITHUB_ENV"
-          echo "ANDROID_SDK_ROOT=$SDK" >> "$GITHUB_ENV"
+          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
 
-          mkdir -p "$SDK/licenses"
-
-          if [ -d "$SDK/cmdline-tools/latest/bin" ]; then
-            SDKMANAGER="$SDK/cmdline-tools/latest/bin/sdkmanager"
-          elif [ -d "$SDK/cmdline-tools/16.0/bin" ]; then
-            SDKMANAGER="$SDK/cmdline-tools/16.0/bin/sdkmanager"
-          else
-            echo "::error::لم يتم العثور على Android SDK Command-line Tools."
+          if [ ! -x "$SDKMANAGER" ]; then
+            echo "::error::تعذر العثور على sdkmanager."
             exit 1
           fi
-
-          chmod +x "$SDKMANAGER"
-
-          yes | "$SDKMANAGER" --licenses || true
 
           "$SDKMANAGER" --install \
             "platform-tools" \
             "platforms;android-35" \
             "build-tools;35.0.0"
 
-      - name: إنشاء ملفات مشروع Android
+      - name: إنشاء مشروع Android
         shell: bash
         run: |
+          set -e
+
           mkdir -p app/src/main/java/com/example/pdfreader
-          mkdir -p app/src/main/res/values
 
           cat > settings.gradle <<'EOF'
           pluginManagement {
@@ -121,13 +113,16 @@ jobs:
                   android:label="قارئ PDF"
                   android:allowBackup="false"
                   android:supportsRtl="true">
+
                   <activity
                       android:name="com.example.pdfreader.MainActivity"
                       android:exported="true">
+
                       <intent-filter>
                           <action android:name="android.intent.action.MAIN"/>
                           <category android:name="android.intent.category.LAUNCHER"/>
                       </intent-filter>
+
                   </activity>
               </application>
           </manifest>
@@ -165,23 +160,28 @@ jobs:
                   title.setTextSize(24);
                   title.setGravity(Gravity.CENTER);
 
-                  Button button = new Button(this);
-                  button.setText("اختيار ملف PDF");
+                  TextView description = new TextView(this);
+                  description.setText("اختر ملف PDF من جهازك.");
+                  description.setTextSize(16);
+                  description.setGravity(Gravity.CENTER);
 
-                  TextView info = new TextView(this);
-                  info.setText("اختر ملفًا من جهازك لفتحه.");
-                  info.setGravity(Gravity.CENTER);
+                  Button openButton = new Button(this);
+                  openButton.setText("اختيار ملف PDF");
 
                   layout.addView(title);
-                  layout.addView(info);
+                  layout.addView(description);
 
-                  layout.addView(button, new LinearLayout.LayoutParams(
-                      ViewGroup.LayoutParams.MATCH_PARENT,
-                      ViewGroup.LayoutParams.WRAP_CONTENT));
+                  layout.addView(
+                      openButton,
+                      new LinearLayout.LayoutParams(
+                          ViewGroup.LayoutParams.MATCH_PARENT,
+                          ViewGroup.LayoutParams.WRAP_CONTENT
+                      )
+                  );
 
                   setContentView(layout);
 
-                  button.setOnClickListener(v -> {
+                  openButton.setOnClickListener(v -> {
                       Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
                       intent.addCategory(Intent.CATEGORY_OPENABLE);
                       intent.setType("application/pdf");
@@ -192,25 +192,28 @@ jobs:
               @Override
               protected void onActivityResult(
                       int requestCode, int resultCode, Intent data) {
+
                   super.onActivityResult(requestCode, resultCode, data);
 
                   if (requestCode == PICK_PDF &&
-                          resultCode == RESULT_OK &&
-                          data != null) {
+                      resultCode == RESULT_OK &&
+                      data != null) {
+
                       Uri uri = data.getData();
 
                       if (uri != null) {
                           Intent intent = new Intent(Intent.ACTION_VIEW);
                           intent.setDataAndType(uri, "application/pdf");
                           intent.addFlags(
-                              Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                              Intent.FLAG_GRANT_READ_URI_PERMISSION
+                          );
 
                           try {
                               startActivity(intent);
                           } catch (Exception e) {
                               Toast.makeText(
                                   this,
-                                  "لم يُعثر على عارض PDF مناسب.",
+                                  "لم يتم العثور على تطبيق لعرض PDF.",
                                   Toast.LENGTH_LONG
                               ).show();
                           }
@@ -226,17 +229,28 @@ jobs:
           gradle-version: '8.7'
 
       - name: بناء APK
-        run: gradle assembleDebug --no-daemon
+        shell: bash
+        run: |
+          set -e
+          gradle assembleDebug --no-daemon
 
       - name: التحقق من APK
         shell: bash
         run: |
-          test -f app/build/outputs/apk/debug/app-debug.apk
+          APK="app/build/outputs/apk/debug/app-debug.apk"
+
+          if [ ! -f "$APK" ]; then
+            echo "::error::لم يتم إنشاء ملف APK."
+            exit 1
+          fi
+
+          echo "تم إنشاء APK بنجاح."
+          ls -lh "$APK"
 
       - name: رفع APK
         uses: actions/upload-artifact@v4
         with:
           name: pdf-reader-apk
-          path: app/build/outputs/apk/debug/*.apk
+          path: app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
           retention-days: 7
