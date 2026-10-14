@@ -1,59 +1,40 @@
-name: Build PDF Reader APK
+name: Build Floating PDF Reader APK
 
 on:
-  push:
-    branches:
-      - main
   workflow_dispatch:
+  push:
+    branches: [main, master]
 
 permissions:
   contents: read
 
 jobs:
   build:
-    name: Build Android APK
     runs-on: ubuntu-latest
-
-    env:
-      ANDROID_HOME: /usr/local/lib/android/sdk
-      ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
-
     steps:
-      - name: جلب الكود
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: تثبيت Java 17
+      - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
 
-      - name: تجهيز Android SDK
+      - name: Set up Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: تثبيت مكونات Android SDK
+      - name: Install Android SDK packages
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0"
+
+      - name: Create Android project
         shell: bash
         run: |
           set -e
-
-          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
-
-          if [ ! -x "$SDKMANAGER" ]; then
-            echo "::error::تعذر العثور على sdkmanager."
-            exit 1
-          fi
-
-          "$SDKMANAGER" --install \
-            "platform-tools" \
-            "platforms;android-35" \
-            "build-tools;35.0.0"
-
-      - name: إنشاء مشروع Android
-        shell: bash
-        run: |
-          set -e
-
-          mkdir -p app/src/main/java/com/example/pdfreader
+          mkdir -p app/src/main/java/com/example/floatingpdf
+          mkdir -p app/src/main/res/values
 
           cat > settings.gradle <<'EOF'
           pluginManagement {
@@ -63,7 +44,6 @@ jobs:
                   gradlePluginPortal()
               }
           }
-
           dependencyResolutionManagement {
               repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
               repositories {
@@ -71,20 +51,20 @@ jobs:
                   mavenCentral()
               }
           }
-
-          rootProject.name = "PDFReader"
+          rootProject.name = "FloatingPdfReader"
           include(":app")
           EOF
 
           cat > build.gradle <<'EOF'
           plugins {
-              id 'com.android.application' version '8.6.1' apply false
+              id 'com.android.application' version '8.7.3' apply false
           }
           EOF
 
           cat > gradle.properties <<'EOF'
-          android.useAndroidX=true
           org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
+          android.useAndroidX=true
+          android.nonTransitiveRClass=true
           EOF
 
           cat > app/build.gradle <<'EOF'
@@ -93,11 +73,11 @@ jobs:
           }
 
           android {
-              namespace 'com.example.pdfreader'
+              namespace 'com.example.floatingpdf'
               compileSdk 35
 
               defaultConfig {
-                  applicationId 'com.example.pdfreader'
+                  applicationId 'com.example.floatingpdf'
                   minSdk 23
                   targetSdk 28
                   versionCode 1
@@ -106,151 +86,524 @@ jobs:
           }
           EOF
 
+          cat > app/src/main/res/values/styles.xml <<'EOF'
+          <resources>
+              <style name="AppTheme" parent="@android:style/Theme.Material.Light.NoActionBar">
+                  <item name="android:fontFamily">sans</item>
+                  <item name="android:colorAccent">#2367D1</item>
+                  <item name="android:windowLightStatusBar">true</item>
+                  <item name="android:statusBarColor">#FFFFFF</item>
+                  <item name="android:navigationBarColor">#FFFFFF</item>
+                  <item name="android:windowActionModeOverlay">true</item>
+              </style>
+          </resources>
+          EOF
+
           cat > app/src/main/AndroidManifest.xml <<'EOF'
           <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
               <application
-                  android:theme="@android:style/Theme.Material.Light.NoActionBar"
-                  android:label="قارئ PDF"
                   android:allowBackup="false"
+                  android:label="قارئ PDF العائم"
+                  android:theme="@style/AppTheme"
                   android:supportsRtl="true">
-
                   <activity
-                      android:name="com.example.pdfreader.MainActivity"
+                      android:name=".MainActivity"
                       android:exported="true">
-
                       <intent-filter>
-                          <action android:name="android.intent.action.MAIN"/>
-                          <category android:name="android.intent.category.LAUNCHER"/>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
                       </intent-filter>
-
                   </activity>
+                  <service
+                      android:name=".FloatingPdfService"
+                      android:exported="false" />
               </application>
           </manifest>
           EOF
 
-          cat > app/src/main/java/com/example/pdfreader/MainActivity.java <<'EOF'
-          package com.example.pdfreader;
+          cat > app/src/main/java/com/example/floatingpdf/MainActivity.java <<'EOF'
+          package com.example.floatingpdf;
 
           import android.app.Activity;
-          import android.os.Bundle;
           import android.content.Intent;
           import android.net.Uri;
+          import android.os.Bundle;
+          import android.provider.Settings;
           import android.view.Gravity;
-          import android.view.ViewGroup;
+          import android.view.View;
           import android.widget.Button;
           import android.widget.LinearLayout;
           import android.widget.TextView;
           import android.widget.Toast;
 
           public class MainActivity extends Activity {
-
-              private static final int PICK_PDF = 100;
+              private static final int PICK_PDF = 101;
+              private static final int OVERLAY_PERMISSION = 102;
+              private Uri selectedPdf;
 
               @Override
-              protected void onCreate(Bundle savedInstanceState) {
-                  super.onCreate(savedInstanceState);
+              protected void onCreate(Bundle state) {
+                  super.onCreate(state);
+                  showHome();
+              }
 
-                  LinearLayout layout = new LinearLayout(this);
-                  layout.setOrientation(LinearLayout.VERTICAL);
-                  layout.setGravity(Gravity.CENTER);
-                  layout.setPadding(32, 32, 32, 32);
+              private void showHome() {
+                  LinearLayout root = new LinearLayout(this);
+                  root.setOrientation(LinearLayout.VERTICAL);
+                  root.setGravity(Gravity.CENTER);
+                  root.setPadding(28, 28, 28, 28);
+                  root.setBackgroundColor(0xFFFFFFFF);
 
                   TextView title = new TextView(this);
-                  title.setText("قارئ ملفات PDF");
-                  title.setTextSize(24);
+                  title.setText("قارئ PDF العائم");
+                  title.setTextSize(25);
+                  title.setTextColor(0xFF172033);
                   title.setGravity(Gravity.CENTER);
+                  title.setPadding(0, 0, 0, 14);
+                  root.addView(title, new LinearLayout.LayoutParams(-1, -2));
 
                   TextView description = new TextView(this);
-                  description.setText("اختر ملف PDF من جهازك.");
+                  description.setText("اختر كتاب PDF ثم افتحه في نافذة صغيرة فوق التطبيقات الأخرى. يمكنك تغيير حجم النافذة وتحريكها والتنقل بين الصفحات.");
                   description.setTextSize(16);
+                  description.setTextColor(0xFF596273);
                   description.setGravity(Gravity.CENTER);
+                  description.setPadding(0, 0, 0, 24);
+                  root.addView(description, new LinearLayout.LayoutParams(-1, -2));
 
-                  Button openButton = new Button(this);
-                  openButton.setText("اختيار ملف PDF");
+                  Button choose = new Button(this);
+                  choose.setText("اختيار كتاب PDF");
+                  root.addView(choose, new LinearLayout.LayoutParams(-1, -2));
+                  choose.setOnClickListener(v -> choosePdf());
 
-                  layout.addView(title);
-                  layout.addView(description);
+                  TextView note = new TextView(this);
+                  note.setText("يلزم السماح للتطبيق بالظهور فوق التطبيقات الأخرى.");
+                  note.setTextSize(13);
+                  note.setTextColor(0xFF737B89);
+                  note.setGravity(Gravity.CENTER);
+                  note.setPadding(0, 20, 0, 0);
+                  root.addView(note, new LinearLayout.LayoutParams(-1, -2));
 
-                  layout.addView(
-                      openButton,
-                      new LinearLayout.LayoutParams(
-                          ViewGroup.LayoutParams.MATCH_PARENT,
-                          ViewGroup.LayoutParams.WRAP_CONTENT
-                      )
-                  );
+                  setContentView(root);
+              }
 
-                  setContentView(layout);
-
-                  openButton.setOnClickListener(v -> {
-                      Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
-                      intent.addCategory(Intent.CATEGORY_OPENABLE);
-                      intent.setType("application/pdf");
-                      startActivityForResult(intent, PICK_PDF);
-                  });
+              private void choosePdf() {
+                  Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+                  intent.addCategory(Intent.CATEGORY_OPENABLE);
+                  intent.setType("application/pdf");
+                  startActivityForResult(intent, PICK_PDF);
               }
 
               @Override
-              protected void onActivityResult(
-                      int requestCode, int resultCode, Intent data) {
-
+              protected void onActivityResult(int requestCode, int resultCode, Intent data) {
                   super.onActivityResult(requestCode, resultCode, data);
-
-                  if (requestCode == PICK_PDF &&
-                      resultCode == RESULT_OK &&
-                      data != null) {
-
-                      Uri uri = data.getData();
-
-                      if (uri != null) {
-                          Intent intent = new Intent(Intent.ACTION_VIEW);
-                          intent.setDataAndType(uri, "application/pdf");
-                          intent.addFlags(
-                              Intent.FLAG_GRANT_READ_URI_PERMISSION
-                          );
-
-                          try {
-                              startActivity(intent);
-                          } catch (Exception e) {
-                              Toast.makeText(
-                                  this,
-                                  "لم يتم العثور على تطبيق لعرض PDF.",
-                                  Toast.LENGTH_LONG
-                              ).show();
-                          }
+                  if (requestCode == PICK_PDF && resultCode == RESULT_OK && data != null && data.getData() != null) {
+                      selectedPdf = data.getData();
+                      try {
+                          getContentResolver().takePersistableUriPermission(
+                              selectedPdf, Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                      } catch (Exception ignored) { }
+                      if (!Settings.canDrawOverlays(this)) {
+                          Intent settings = new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                              Uri.parse("package:" + getPackageName()));
+                          startActivityForResult(settings, OVERLAY_PERMISSION);
+                      } else {
+                          launchFloatingReader();
                       }
+                  } else if (requestCode == OVERLAY_PERMISSION && selectedPdf != null) {
+                      if (Settings.canDrawOverlays(this)) launchFloatingReader();
+                      else Toast.makeText(this, "يجب السماح بالظهور فوق التطبيقات لتشغيل النافذة العائمة.", Toast.LENGTH_LONG).show();
                   }
+              }
+
+              private void launchFloatingReader() {
+                  if (selectedPdf == null) return;
+                  Intent service = new Intent(this, FloatingPdfService.class);
+                  service.setAction(FloatingPdfService.ACTION_OPEN);
+                  service.setData(selectedPdf);
+                  startService(service);
+                  Toast.makeText(this, "تم فتح قارئ PDF العائم", Toast.LENGTH_SHORT).show();
+                  finish();
               }
           }
           EOF
 
-      - name: إعداد Gradle
-        uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: '8.7'
+          cat > app/src/main/java/com/example/floatingpdf/FloatingPdfService.java <<'EOF'
+          package com.example.floatingpdf;
 
-      - name: بناء APK
-        shell: bash
+          import android.app.Service;
+          import android.content.Intent;
+          import android.graphics.Bitmap;
+          import android.graphics.Color;
+          import android.graphics.Rect;
+          import android.graphics.pdf.PdfRenderer;
+          import android.net.Uri;
+          import android.os.Handler;
+          import android.os.IBinder;
+          import android.os.Looper;
+          import android.os.ParcelFileDescriptor;
+          import android.provider.Settings;
+          import android.view.Gravity;
+          import android.view.MotionEvent;
+          import android.view.View;
+          import android.view.WindowManager;
+          import android.widget.Button;
+          import android.widget.FrameLayout;
+          import android.widget.ImageView;
+          import android.widget.LinearLayout;
+          import android.widget.SeekBar;
+          import android.widget.TextView;
+          import android.widget.Toast;
+
+          import java.io.IOException;
+
+          public class FloatingPdfService extends Service {
+              public static final String ACTION_OPEN = "com.example.floatingpdf.OPEN";
+              private WindowManager windowManager;
+              private WindowManager.LayoutParams panelParams;
+              private WindowManager.LayoutParams bubbleParams;
+              private LinearLayout panel;
+              private FrameLayout pageFrame;
+              private ImageView pageImage;
+              private TextView pageLabel;
+              private SeekBar timeline;
+              private View bubble;
+              private ParcelFileDescriptor fileDescriptor;
+              private PdfRenderer renderer;
+              private int currentPage = 0;
+              private int totalPages = 0;
+              private int panelWidth;
+              private int panelHeight;
+              private boolean minimized = false;
+              private boolean updatingSeek = false;
+              private float downRawX, downRawY;
+              private int startX, startY;
+              private final Handler handler = new Handler(Looper.getMainLooper());
+
+              @Override
+              public void onCreate() {
+                  super.onCreate();
+                  windowManager = (WindowManager) getSystemService(WINDOW_SERVICE);
+              }
+
+              @Override
+              public int onStartCommand(Intent intent, int flags, int startId) {
+                  if (intent != null && ACTION_OPEN.equals(intent.getAction()) && intent.getData() != null) {
+                      try {
+                          openPdf(intent.getData());
+                          showPanel();
+                      } catch (Exception e) {
+                          Toast.makeText(this, "تعذر فتح ملف PDF: " + e.getMessage(), Toast.LENGTH_LONG).show();
+                          stopSelf();
+                      }
+                  }
+                  return START_NOT_STICKY;
+              }
+
+              private void openPdf(Uri uri) throws IOException {
+                  closePdf();
+                  fileDescriptor = getContentResolver().openFileDescriptor(uri, "r");
+                  if (fileDescriptor == null) throw new IOException("لم يمكن الوصول إلى الملف");
+                  renderer = new PdfRenderer(fileDescriptor);
+                  totalPages = renderer.getPageCount();
+                  currentPage = 0;
+                  if (totalPages < 1) throw new IOException("الملف لا يحتوي على صفحات");
+              }
+
+              private int overlayType() {
+                  return WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY;
+              }
+
+              private void showPanel() {
+                  if (!Settings.canDrawOverlays(this)) {
+                      Toast.makeText(this, "فعّل إذن الظهور فوق التطبيقات أولاً.", Toast.LENGTH_LONG).show();
+                      stopSelf();
+                      return;
+                  }
+                  removeViews();
+                  minimized = false;
+                  panelWidth = dp(330);
+                  panelHeight = dp(440);
+
+                  panel = new LinearLayout(this);
+                  panel.setOrientation(LinearLayout.VERTICAL);
+                  panel.setPadding(dp(8), dp(6), dp(8), dp(8));
+                  panel.setBackgroundColor(Color.WHITE);
+                  panel.setElevation(dp(10));
+
+                  LinearLayout header = new LinearLayout(this);
+                  header.setOrientation(LinearLayout.HORIZONTAL);
+                  header.setGravity(Gravity.CENTER_VERTICAL);
+                  header.setPadding(dp(4), 0, 0, 0);
+                  header.setBackgroundColor(0xFFF3F5F8);
+
+                  TextView title = new TextView(this);
+                  title.setText("قارئ PDF");
+                  title.setTextColor(0xFF182230);
+                  title.setTextSize(14);
+                  title.setGravity(Gravity.CENTER_VERTICAL);
+                  title.setPadding(dp(5), 0, 0, 0);
+                  header.addView(title, new LinearLayout.LayoutParams(0, dp(42), 1));
+
+                  Button smaller = new Button(this);
+                  smaller.setText("−");
+                  smaller.setTextSize(18);
+                  smaller.setMinWidth(0);
+                  smaller.setMinimumWidth(dp(38));
+                  smaller.setPadding(0, 0, 0, 0);
+                  header.addView(smaller, new LinearLayout.LayoutParams(dp(38), dp(40)));
+
+                  Button larger = new Button(this);
+                  larger.setText("+");
+                  larger.setTextSize(18);
+                  larger.setMinWidth(0);
+                  larger.setMinimumWidth(dp(38));
+                  larger.setPadding(0, 0, 0, 0);
+                  header.addView(larger, new LinearLayout.LayoutParams(dp(38), dp(40)));
+
+                  Button minimize = new Button(this);
+                  minimize.setText("●");
+                  minimize.setTextSize(16);
+                  minimize.setMinWidth(0);
+                  minimize.setMinimumWidth(dp(42));
+                  minimize.setPadding(0, 0, 0, 0);
+                  header.addView(minimize, new LinearLayout.LayoutParams(dp(42), dp(40)));
+
+                  Button close = new Button(this);
+                  close.setText("×");
+                  close.setTextSize(22);
+                  close.setTextColor(0xFFB42318);
+                  close.setMinWidth(0);
+                  close.setMinimumWidth(dp(42));
+                  close.setPadding(0, 0, 0, 0);
+                  header.addView(close, new LinearLayout.LayoutParams(dp(42), dp(40)));
+                  panel.addView(header, new LinearLayout.LayoutParams(-1, dp(44)));
+
+                  pageFrame = new FrameLayout(this);
+                  pageFrame.setBackgroundColor(0xFFE8EBEF);
+                  pageImage = new ImageView(this);
+                  pageImage.setBackgroundColor(Color.WHITE);
+                  pageImage.setScaleType(ImageView.ScaleType.FIT_CENTER);
+                  pageFrame.addView(pageImage, new FrameLayout.LayoutParams(-1, -1));
+                  panel.addView(pageFrame, new LinearLayout.LayoutParams(-1, 0, 1));
+
+                  pageLabel = new TextView(this);
+                  pageLabel.setTextColor(0xFF202938);
+                  pageLabel.setTextSize(13);
+                  pageLabel.setGravity(Gravity.CENTER);
+                  pageLabel.setPadding(0, dp(5), 0, dp(2));
+                  panel.addView(pageLabel, new LinearLayout.LayoutParams(-1, dp(28)));
+
+                  timeline = new SeekBar(this);
+                  timeline.setMax(Math.max(0, totalPages - 1));
+                  panel.addView(timeline, new LinearLayout.LayoutParams(-1, dp(36)));
+
+                  LinearLayout nav = new LinearLayout(this);
+                  nav.setGravity(Gravity.CENTER);
+                  Button prev = new Button(this);
+                  prev.setText("‹ السابق");
+                  Button next = new Button(this);
+                  next.setText("التالي ›");
+                  nav.addView(prev, new LinearLayout.LayoutParams(0, dp(42), 1));
+                  nav.addView(next, new LinearLayout.LayoutParams(0, dp(42), 1));
+                  panel.addView(nav, new LinearLayout.LayoutParams(-1, dp(42)));
+
+                  panelParams = new WindowManager.LayoutParams(
+                      panelWidth, panelHeight, overlayType(),
+                      WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                          | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+                      android.graphics.PixelFormat.TRANSLUCENT);
+                  panelParams.gravity = Gravity.TOP | Gravity.START;
+                  panelParams.x = dp(18);
+                  panelParams.y = dp(80);
+
+                  try {
+                      windowManager.addView(panel, panelParams);
+                  } catch (Exception e) {
+                      Toast.makeText(this, "تعذر إنشاء النافذة العائمة.", Toast.LENGTH_LONG).show();
+                      stopSelf();
+                      return;
+                  }
+
+                  View.OnTouchListener dragListener = (v, event) -> {
+                      switch (event.getAction()) {
+                          case MotionEvent.ACTION_DOWN:
+                              downRawX = event.getRawX();
+                              downRawY = event.getRawY();
+                              startX = panelParams.x;
+                              startY = panelParams.y;
+                              return true;
+                          case MotionEvent.ACTION_MOVE:
+                              panelParams.x = startX + (int)(event.getRawX() - downRawX);
+                              panelParams.y = startY + (int)(event.getRawY() - downRawY);
+                              try { windowManager.updateViewLayout(panel, panelParams); } catch (Exception ignored) { }
+                              return true;
+                      }
+                      return false;
+                  };
+                  title.setOnTouchListener(dragListener);
+                  header.setOnTouchListener(dragListener);
+
+                  smaller.setOnClickListener(v -> {
+                      panelWidth = Math.max(dp(240), panelWidth - dp(30));
+                      panelHeight = Math.max(dp(300), panelHeight - dp(25));
+                      panelParams.width = panelWidth;
+                      panelParams.height = panelHeight;
+                      try { windowManager.updateViewLayout(panel, panelParams); } catch (Exception ignored) { }
+                  });
+                  larger.setOnClickListener(v -> {
+                      int maxWidth = (int)(getResources().getDisplayMetrics().widthPixels * 0.95f);
+                      int maxHeight = (int)(getResources().getDisplayMetrics().heightPixels * 0.85f);
+                      panelWidth = Math.min(maxWidth, panelWidth + dp(30));
+                      panelHeight = Math.min(maxHeight, panelHeight + dp(25));
+                      panelParams.width = panelWidth;
+                      panelParams.height = panelHeight;
+                      try { windowManager.updateViewLayout(panel, panelParams); } catch (Exception ignored) { }
+                  });
+                  minimize.setOnClickListener(v -> minimizeToBubble());
+                  close.setOnClickListener(v -> stopSelf());
+                  prev.setOnClickListener(v -> renderPage(currentPage - 1));
+                  next.setOnClickListener(v -> renderPage(currentPage + 1));
+                  timeline.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+                      @Override public void onProgressChanged(SeekBar bar, int progress, boolean fromUser) {
+                          if (fromUser && !updatingSeek) renderPage(progress);
+                      }
+                      @Override public void onStartTrackingTouch(SeekBar bar) { }
+                      @Override public void onStopTrackingTouch(SeekBar bar) { }
+                  });
+                  pageFrame.setOnTouchListener((v, event) -> {
+                      if (event.getAction() == MotionEvent.ACTION_UP) {
+                          float x = event.getX();
+                          if (x < v.getWidth() * 0.35f) renderPage(currentPage - 1);
+                          else if (x > v.getWidth() * 0.65f) renderPage(currentPage + 1);
+                          return true;
+                      }
+                      return true;
+                  });
+                  renderPage(currentPage);
+              }
+
+              private void renderPage(int index) {
+                  if (renderer == null || totalPages == 0) return;
+                  currentPage = Math.max(0, Math.min(totalPages - 1, index));
+                  PdfRenderer.Page page = null;
+                  try {
+                      page = renderer.openPage(currentPage);
+                      int availableW = pageFrame == null ? dp(300) : Math.max(dp(100), pageFrame.getWidth() - dp(12));
+                      int availableH = pageFrame == null ? dp(330) : Math.max(dp(100), pageFrame.getHeight() - dp(12));
+                      float scale = Math.min((float) availableW / page.getWidth(), (float) availableH / page.getHeight());
+                      int width = Math.max(1, (int)(page.getWidth() * scale));
+                      int height = Math.max(1, (int)(page.getHeight() * scale));
+                      Bitmap bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888);
+                      bitmap.eraseColor(Color.WHITE);
+                      page.render(bitmap, new Rect(0, 0, width, height), null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY);
+                      pageImage.setImageBitmap(bitmap);
+                      pageLabel.setText("الصفحة " + (currentPage + 1) + " / " + totalPages);
+                      updatingSeek = true;
+                      timeline.setProgress(currentPage);
+                      updatingSeek = false;
+                  } catch (Exception e) {
+                      Toast.makeText(this, "حدث خطأ أثناء عرض الصفحة.", Toast.LENGTH_SHORT).show();
+                  } finally {
+                      if (page != null) page.close();
+                  }
+              }
+
+              private void minimizeToBubble() {
+                  if (panel != null) {
+                      try { windowManager.removeView(panel); } catch (Exception ignored) { }
+                      panel = null;
+                  }
+                  minimized = true;
+                  TextView icon = new TextView(this);
+                  icon.setText("PDF");
+                  icon.setTextColor(Color.WHITE);
+                  icon.setTextSize(12);
+                  icon.setGravity(Gravity.CENTER);
+                  icon.setBackgroundColor(0xFF2367D1);
+                  icon.setElevation(dp(8));
+                  bubble = icon;
+                  bubbleParams = new WindowManager.LayoutParams(
+                      dp(58), dp(58), overlayType(),
+                      WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                          | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+                      android.graphics.PixelFormat.TRANSLUCENT);
+                  bubbleParams.gravity = Gravity.TOP | Gravity.START;
+                  bubbleParams.x = dp(10);
+                  bubbleParams.y = dp(120);
+                  try { windowManager.addView(bubble, bubbleParams); }
+                  catch (Exception e) { stopSelf(); return; }
+
+                  bubble.setOnClickListener(v -> showPanel());
+                  bubble.setOnTouchListener((v, event) -> {
+                      switch (event.getAction()) {
+                          case MotionEvent.ACTION_DOWN:
+                              downRawX = event.getRawX();
+                              downRawY = event.getRawY();
+                              startX = bubbleParams.x;
+                              startY = bubbleParams.y;
+                              return true;
+                          case MotionEvent.ACTION_MOVE:
+                              bubbleParams.x = startX + (int)(event.getRawX() - downRawX);
+                              bubbleParams.y = startY + (int)(event.getRawY() - downRawY);
+                              try { windowManager.updateViewLayout(bubble, bubbleParams); } catch (Exception ignored) { }
+                              return true;
+                          case MotionEvent.ACTION_UP:
+                              if (Math.abs(event.getRawX() - downRawX) < dp(8)
+                                  && Math.abs(event.getRawY() - downRawY) < dp(8)) showPanel();
+                              return true;
+                      }
+                      return true;
+                  });
+              }
+
+              private void removeViews() {
+                  if (panel != null) {
+                      try { windowManager.removeView(panel); } catch (Exception ignored) { }
+                      panel = null;
+                  }
+                  if (bubble != null) {
+                      try { windowManager.removeView(bubble); } catch (Exception ignored) { }
+                      bubble = null;
+                  }
+              }
+
+              private void closePdf() {
+                  if (renderer != null) {
+                      try { renderer.close(); } catch (Exception ignored) { }
+                      renderer = null;
+                  }
+                  if (fileDescriptor != null) {
+                      try { fileDescriptor.close(); } catch (Exception ignored) { }
+                      fileDescriptor = null;
+                  }
+              }
+
+              private int dp(float value) {
+                  return (int)(value * getResources().getDisplayMetrics().density + 0.5f);
+              }
+
+              @Override
+              public void onDestroy() {
+                  removeViews();
+                  closePdf();
+                  handler.removeCallbacksAndMessages(null);
+                  super.onDestroy();
+              }
+
+              @Override
+              public IBinder onBind(Intent intent) { return null; }
+          }
+          EOF
+
+      - name: Build debug APK
         run: |
-          set -e
-          gradle assembleDebug --no-daemon
+          gradle wrapper --gradle-version 8.9
+          ./gradlew --no-daemon assembleDebug
 
-      - name: التحقق من APK
-        shell: bash
-        run: |
-          APK="app/build/outputs/apk/debug/app-debug.apk"
-
-          if [ ! -f "$APK" ]; then
-            echo "::error::لم يتم إنشاء ملف APK."
-            exit 1
-          fi
-
-          echo "تم إنشاء APK بنجاح."
-          ls -lh "$APK"
-
-      - name: رفع APK
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: pdf-reader-apk
+          name: floating-pdf-reader-apk
           path: app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
-          retention-days: 7
