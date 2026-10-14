@@ -24,10 +24,37 @@ jobs:
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Install Android SDK packages
+      - name: Install Android SDK packages (retry safely)
+        shell: bash
         run: |
-          yes | sdkmanager --licenses >/dev/null || true
-          sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0"
+          set -euo pipefail
+          SDKMANAGER="${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager"
+          if [ ! -x "$SDKMANAGER" ]; then
+            SDKMANAGER="$(find "${ANDROID_HOME}/cmdline-tools" -type f -name sdkmanager | head -n 1)"
+          fi
+          if [ -z "${SDKMANAGER:-}" ] || [ ! -f "$SDKMANAGER" ]; then
+            echo "sdkmanager was not found in Android SDK installation"
+            exit 1
+          fi
+
+          # Accept licenses without allowing a broken pipe from `yes` to fail the step.
+          set +o pipefail
+          yes | "$SDKMANAGER" --sdk_root="${ANDROID_HOME}" --licenses >/dev/null 2>&1 || true
+          set -o pipefail
+
+          # Retry transient repository/network errors.
+          for attempt in 1 2 3; do
+            if "$SDKMANAGER" --sdk_root="${ANDROID_HOME}" \
+              "platform-tools" "platforms;android-35" "build-tools;35.0.0"; then
+              exit 0
+            fi
+            if [ "$attempt" -lt 3 ]; then
+              echo "sdkmanager failed on attempt $attempt; retrying in 15 seconds..."
+              sleep 15
+            fi
+          done
+          echo "Android SDK package installation failed after 3 attempts."
+          exit 1
 
       - name: Create Android project
         shell: bash
@@ -597,9 +624,12 @@ jobs:
           EOF
 
       - name: Build debug APK
-        run: |
-          gradle wrapper --gradle-version 8.9
-          ./gradlew --no-daemon assembleDebug
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Build debug APK
+        run: gradle --no-daemon assembleDebug
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
