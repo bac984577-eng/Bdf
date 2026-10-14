@@ -2,12 +2,18 @@ name: Build APK
 
 on:
   push:
-    branches: [main]
+    branches:
+      - main
   workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   build:
+    name: Build Android APK
     runs-on: ubuntu-latest
+
     steps:
       - name: جلب الكود
         uses: actions/checkout@v4
@@ -16,21 +22,75 @@ jobs:
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: 17
+          java-version: '17'
+          cache: gradle
 
       - name: تثبيت Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: تجهيز Gradle
-        uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: 8.7
+      - name: التحقق من ملفات المشروع
+        shell: bash
+        run: |
+          echo "التحقق من ملفات مشروع Android..."
 
-      - name: بناء نسخة debug
-        run: gradle assembleDebug --no-daemon
+          if [ ! -f "settings.gradle" ] && [ ! -f "settings.gradle.kts" ]; then
+            echo "::error::ملف settings.gradle أو settings.gradle.kts غير موجود."
+            exit 1
+          fi
+
+          if [ ! -d "app" ]; then
+            echo "::error::مجلد app غير موجود."
+            exit 1
+          fi
+
+          if [ ! -f "app/build.gradle" ] && [ ! -f "app/build.gradle.kts" ]; then
+            echo "::error::ملف إعدادات Gradle الخاص بالتطبيق غير موجود."
+            exit 1
+          fi
+
+          echo "تم العثور على ملفات المشروع."
+
+      - name: إعداد Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: منح صلاحية التنفيذ لـ Gradle Wrapper
+        shell: bash
+        run: |
+          if [ -f "./gradlew" ]; then
+            chmod +x ./gradlew
+          fi
+
+      - name: بناء نسخة Debug
+        shell: bash
+        run: |
+          if [ -f "./gradlew" ]; then
+            ./gradlew assembleDebug --no-daemon
+          else
+            echo "::error::ملف gradlew غير موجود. يجب تضمين Gradle Wrapper في المشروع."
+            exit 1
+          fi
+
+      - name: التحقق من ملف APK
+        shell: bash
+        run: |
+          APK_PATH="app/build/outputs/apk/debug"
+
+          if [ ! -d "$APK_PATH" ]; then
+            echo "::error::لم يتم العثور على مجلد APK الناتج."
+            exit 1
+          fi
+
+          find "$APK_PATH" -maxdepth 1 -type f -name "*.apk" -print
+
+          if ! find "$APK_PATH" -maxdepth 1 -type f -name "*.apk" | grep -q .; then
+            echo "::error::لم ينتج البناء أي ملف APK."
+            exit 1
+          fi
 
       - name: رفع ملف APK
         uses: actions/upload-artifact@v4
         with:
           name: floating-pdf-reader-apk
           path: app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+          retention-days: 7
